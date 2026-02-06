@@ -4,9 +4,9 @@ from typing import Any, Dict, List
 import pendulum
 from airflow.sdk import DAG, task
 
-from utils.helpers.openmetadata_helpers import OpenMetadataQualityFramework
+from utils.helpers.openmetadata_helpers_local import OpenMetadataQualityFrameworkLocal
 
-# --- Global configuration ---
+# --- Local test configuration ---
 TEAM_NAME = "O&M"
 COMMENT_USER = "dataquality_bot"
 MENTION_USER = "aimen.denche.partner"
@@ -41,14 +41,14 @@ DEFAULT_BQ_SCHEMA_FIELDS = [
 DEVICE_CONFIG: Dict[str, Dict[str, Any]] = {
     "JBOX1": {
         "source_table": "lakehouse.ems.ems_banktelemetry_bu_battery_unit_id_bbms_bbms_id_vendor_lg_warranty_bank",
-        "bq_table_name": "JBOX1_coverage_quality_test",
+        "bq_table_name": "JBOX1_sdk_coverage_quality_test",
         "join_key": "nw_asset_id",
         "trino_filter_clause": "controller_id is null",
         "expected_nb_messages": 60 * 60 * 24,
     },
     "JBOX2": {
         "source_table": "lakehouse.ems.ems_telemetryseries_gc",
-        "bq_table_name": "JBOX2_coverage_quality_test",
+        "bq_table_name": "JBOX2_sdk_coverage_quality_test",
         "join_key": "controller_id",
         "trino_filter_clause": "controller_id is not null",
         "expected_nb_messages": 0.95 * 60 * 60 * 24,
@@ -176,9 +176,9 @@ def build_test_cases(device: str, bq_table_fqn: str, omd_table_fqn: str) -> List
 
 
 with DAG(
-    dag_id="sdk_OMD_JBOX_Coverage_and_Missing_Data_Tests",
+    dag_id="sdk_OMD_JBOX_Coverage_and_Missing_Data_Tests_local",
     description=(
-        "Daily and 3-day coverage/missing data tests for JBOX1 & JBOX2. "
+        "LOCAL TEST: Daily and 3-day coverage/missing data tests for JBOX1 & JBOX2. "
         "Incidents are created on first failure then comments are added."
     ),
     schedule="30 1 * * *",
@@ -191,12 +191,12 @@ with DAG(
         "retry_delay": timedelta(minutes=5),
         "retry_exponential_backoff": True,
     },
-    tags=["openmetadata", "test-case", "data-quality"],
+    tags=["openmetadata", "test-case", "data-quality", "local"],
 ) as dag:
 
     @task
     def run_device_quality(device: str, data_interval_start=None):
-        dq = OpenMetadataQualityFramework.from_airflow_variables(comment_user=COMMENT_USER)
+        dq = OpenMetadataQualityFrameworkLocal.from_airflow_variables(comment_user=COMMENT_USER)
         try:
             config = DEVICE_CONFIG[device]
             bq_table_name = config["bq_table_name"]
