@@ -2,11 +2,11 @@ from datetime import timedelta
 from typing import Any, Dict, List
 
 import pendulum
-from airflow.sdk import DAG, task
+from airflow import DAG
+from airflow.decorators import task
 
-from utils.helpers.openmetadata_helpers_local import OpenMetadataQualityFrameworkLocal
+from utils.helpers.openmetadata_helpers import OpenMetadataQualityFramework
 
-# --- Local test configuration ---
 TEAM_NAME = "O&M"
 COMMENT_USER = "dataquality_bot"
 MENTION_USER = "aimen.denche.partner"
@@ -176,11 +176,8 @@ def build_test_cases(device: str, bq_table_fqn: str, omd_table_fqn: str) -> List
 
 
 with DAG(
-    dag_id="sdk_OMD_JBOX_Coverage_and_Missing_Data_Tests_local",
-    description=(
-        "LOCAL TEST: Daily and 3-day coverage/missing data tests for JBOX1 & JBOX2. "
-        "Incidents are created on first failure then comments are added."
-    ),
+    dag_id="sdk_OMD_JBOX_Coverage_and_Missing_Data_Tests_V2",
+    description="LOCAL TEST: JBOX1/JBOX2 coverage + missing tests (daily + 3 days).",
     schedule="30 1 * * *",
     start_date=pendulum.datetime(2025, 9, 24, tz="UTC"),
     catchup=False,
@@ -196,7 +193,7 @@ with DAG(
 
     @task
     def run_device_quality(device: str, data_interval_start=None):
-        dq = OpenMetadataQualityFrameworkLocal.from_airflow_variables(comment_user=COMMENT_USER)
+        dq = OpenMetadataQualityFramework.from_airflow_variables(comment_user=COMMENT_USER)
         try:
             config = DEVICE_CONFIG[device]
             bq_table_name = config["bq_table_name"]

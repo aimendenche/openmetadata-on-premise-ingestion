@@ -2,7 +2,8 @@ from datetime import timedelta
 from typing import Any, Dict, List
 
 import pendulum
-from airflow.sdk import DAG, task
+from airflow import DAG
+from airflow.decorators import task
 
 from utils.helpers.openmetadata_helpers import OpenMetadataQualityFramework
 

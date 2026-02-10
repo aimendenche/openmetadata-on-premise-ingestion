@@ -1,9 +1,8 @@
 import logging
-from typing import Any, Dict, List, Literal, Optional, Sequence, Type
+from typing import Dict, Literal, Optional, Type
 from urllib.parse import quote
 from uuid import UUID
 
-import pendulum
 import requests
 from metadata.generated.schema.api.lineage.addLineage import AddLineageRequest
 from metadata.generated.schema.entity.data.dashboard import Dashboard
@@ -36,63 +35,30 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def _extract_jwt_token(token: str) -> str:
-    raw = (token or "").strip().strip('"').strip("'")
-    if raw.lower().startswith("bearer "):
-        raw = raw.split(" ", 1)[1].strip()
-    if not raw:
-        raise ValueError("OpenMetadata auth token is empty")
-    return raw
-
-
-def _normalize_bearer_token(token: str) -> str:
-    return f"Bearer {_extract_jwt_token(token)}"
-
-
-def _sdk_hostport_from_api_v1(api_v1_url: str) -> str:
-    base = (api_v1_url or "").rstrip("/")
-    if base.endswith("/api/v1"):
-        return base[: -len("/v1")]
-    if base.endswith("/api"):
-        return base
-    return f"{base}/api"
-
-
-def load_omd_config_from_airflow() -> Dict[str, str]:
-    try:
-        from airflow.sdk import Variable
-    except Exception as exc:  # pragma: no cover - Airflow only
-        raise RuntimeError("Airflow Variable API is not available") from exc
-
-    try:
-        omd_api_url = Variable.get("OMD_API_V1_URL")
-        omd_url = Variable.get("OMD_URL")
-        jwt_token = Variable.get("Quality_token")
-    except KeyError as exc:
-        raise RuntimeError(f"Airflow Variable {exc} not set. Configure it in Airflow UI.") from exc
-
-    return {
-        "OMD_API_URL": omd_api_url,
-        "OMD_URL": omd_url,
-        "JWT_TOKEN": jwt_token,
-    }
-
-
 class OpenMetadataHelper:
+    """
+    Helper to simplify interactions with the OpenMetadata API using the Python SDK.
+    """
+
     def __init__(self, omd_url: str, auth_token: str):
-        jwt_raw = _extract_jwt_token(auth_token)
+        raw = (auth_token or "").strip().strip('"').strip("'")
+        if not raw:
+            raise ValueError("OpenMetadata auth token is empty")
+
+        # SDK expects the raw JWT (no 'Bearer ')
+        if raw.lower().startswith("bearer "):
+            jwt_raw = raw.split(" ", 1)[1].strip()
+        else:
+            jwt_raw = raw
 
         self.server_config = OpenMetadataConnection(
-            type="OpenMetadata",
             hostPort=omd_url,
             authProvider=AuthProvider.openmetadata,
             securityConfig=OpenMetadataJWTClientConfig(jwtToken=jwt_raw),
-            verifySSL="no-ssl",
-            secretsManagerProvider="db",
         )
 
+        # REST calls need Bearer
         self._auth_token = f"Bearer {jwt_raw}"
-
         base = omd_url.rstrip("/")
         if base.endswith("/api/v1"):
             self._omd_api_v1 = base
@@ -102,10 +68,12 @@ class OpenMetadataHelper:
             self._omd_api_v1 = f"{base}/api/v1"
 
         try:
-            self.metadata = OpenMetadata(self.server_config)
+            self.metadata: OpenMetadata = OpenMetadata(self.server_config)
             assert self.metadata.health_check()
-        except Exception as exc:
-            raise RuntimeError(f"Failed to connect to OpenMetadata: {exc}") from exc
+            logger.info("Successfully connected to OpenMetadata.")
+        except Exception as e:
+            logger.error("Failed to connect to OpenMetadata: %s", e)
+            raise
 
     # -------------------- Internal helpers --------------------
 
@@ -128,8 +96,8 @@ class OpenMetadataHelper:
                 return str(entity.id.root)
             logger.warning("%s with FQN '%s' not found.", entity_class.__name__, fqn)
             return None
-        except Exception as exc:
-            logger.error("Error fetching %s with FQN '%s': %s", entity_class.__name__, fqn, exc)
+        except Exception as e:
+            logger.error("Error fetching %s with FQN '%s': %s", entity_class.__name__, fqn, e)
             return None
 
     def _collect_all_entities(self, entity_class: Type) -> Dict[str, str]:
@@ -140,8 +108,8 @@ class OpenMetadataHelper:
                 fqn = self._unwrap_name(getattr(p, "fullyQualifiedName", None))
                 if name and fqn:
                     entities[name] = fqn
-        except Exception as exc:
-            logger.error("Failed to retrieve %s via SDK: %s", entity_class.__name__, exc)
+        except Exception as e:
+            logger.error("Failed to retrieve %s via SDK: %s", entity_class.__name__, e)
         return entities
 
     # -------------------- Public getters by FQN --------------------
@@ -213,11 +181,11 @@ class OpenMetadataHelper:
             fqn = self._unwrap_name(getattr(selected, "fullyQualifiedName", None)) or self._unwrap_name(
                 getattr(selected, "name", None)
             )
-            logger.info("Using %s service FQN: %s", service_type, fqn)
+            logger.info("[DEBUG] Using %s service FQN: %s", service_type, fqn)
             return fqn
 
-        except Exception as exc:
-            logger.error("Error retrieving %s services: %s", service_type, exc)
+        except Exception as e:
+            logger.error("Error retrieving %s services: %s", service_type, e)
             return None
 
     # -------------------- Pipelines mapping --------------------
@@ -234,10 +202,10 @@ class OpenMetadataHelper:
                 if name and fqn:
                     mapping[name] = fqn
 
-            logger.info("Built pipeline name -> FQN map with %s entries", len(mapping))
+            logger.info("[DEBUG] Built pipeline name -> FQN map with %s entries", len(mapping))
             return mapping
-        except Exception as exc:
-            logger.error("Error mapping pipelines: %s", exc)
+        except Exception as e:
+            logger.error("Error mapping pipelines: %s", e)
             return {}
 
     # -------------------- Lineage creation --------------------
@@ -285,8 +253,8 @@ class OpenMetadataHelper:
                         inherited=None,
                         href=None,
                     )
-            except Exception as exc:
-                logger.error("Error resolving pipeline '%s' for lineage: %s", pipeline_fqn, exc)
+            except Exception as e:
+                logger.error("Error resolving pipeline '%s' for lineage: %s", pipeline_fqn, e)
 
         try:
             if dry_run:
@@ -334,10 +302,10 @@ class OpenMetadataHelper:
                 )
                 self.metadata.add_lineage(lineage_request)
 
-            logger.info("Lineage created: %s -> %s", from_fqn, to_fqn)
+            logger.info("✅ Lineage created: %s -> %s", from_fqn, to_fqn)
             return True
-        except Exception as exc:
-            logger.error("Error creating lineage %s -> %s: %s", from_fqn, to_fqn, exc)
+        except Exception as e:
+            logger.error("Error creating lineage %s -> %s: %s", from_fqn, to_fqn, e)
             return False
 
     # -------------------- Data Quality --------------------
@@ -364,12 +332,14 @@ class OpenMetadataHelper:
     ) -> str:
         """
         Table-level Custom SQL test case using SDK only.
+        Note: Do NOT pass test_suite_fqn to get_or_create_test_case in 1.11.4.x (unsupported kwarg).
         """
         if not table_fqn or not test_case_name:
             raise ValueError("table_fqn and test_case_name are required.")
         if not sql_expression.strip():
             raise ValueError("sql_expression must not be empty.")
 
+        # Ensure suite exists (side effect only)
         self.ensure_executable_test_suite(table_fqn)
 
         test_case_fqn = f"{table_fqn}.{test_case_name}"
@@ -381,6 +351,7 @@ class OpenMetadataHelper:
             TestCaseParameterValue(name="threshold", value=str(int(threshold))),
         ]
 
+        # IMPORTANT: No test_suite_fqn kwarg here
         self.metadata.get_or_create_test_case(
             test_case_fqn=test_case_fqn,
             entity_link=entity_link,
@@ -388,7 +359,7 @@ class OpenMetadataHelper:
             test_case_parameter_values=params,
         )
 
-        logger.info("TestCase ensured: %s", test_case_fqn)
+        logger.info("✅ TestCase ensured: %s", test_case_fqn)
         return test_case_fqn
 
     def create_column_custom_sql_test_case(
@@ -402,6 +373,7 @@ class OpenMetadataHelper:
     ) -> str:
         """
         Column-level Custom SQL test case using SDK only.
+        Note: same rule, do NOT pass test_suite_fqn kwarg in 1.11.4.x.
         """
         if not table_fqn or not column or not test_case_name:
             raise ValueError("table_fqn, column and test_case_name are required.")
@@ -421,6 +393,7 @@ class OpenMetadataHelper:
             TestCaseParameterValue(name="threshold", value=str(int(threshold))),
         ]
 
+        # IMPORTANT: No test_suite_fqn kwarg here
         self.metadata.get_or_create_test_case(
             test_case_fqn=test_case_fqn,
             entity_link=entity_link,
@@ -428,7 +401,7 @@ class OpenMetadataHelper:
             test_case_parameter_values=params,
         )
 
-        logger.info("TestCase ensured: %s", test_case_fqn)
+        logger.info("✅ TestCase ensured: %s", test_case_fqn)
         return test_case_fqn
 
     # -------------------- Data Quality: results + optional comment --------------------
@@ -469,12 +442,12 @@ class OpenMetadataHelper:
 
         try:
             self.metadata.add_test_case_results(test_results=payload, test_case_fqn=test_case_fqn)
-            logger.info("TestCaseResult pushed for %s", test_case_fqn)
-        except Exception as exc:
-            msg = str(exc).lower()
+            logger.info("✅ TestCaseResult pushed for %s", test_case_fqn)
+        except Exception as e:
+            msg = str(e).lower()
             if "409" in msg or "already exists" in msg or "conflict" in msg:
                 logger.info(
-                    "TestCaseResult already exists for %s at %s",
+                    "ℹ️ TestCaseResult already exists for %s at %s",
                     test_case_fqn,
                     timestamp_ms,
                 )
@@ -488,7 +461,7 @@ class OpenMetadataHelper:
         author: str = "dataquality_bot",
     ) -> None:
         """
-        Add a comment to the TestCase feed thread (REST for feed).
+        Optional: add a comment to the TestCase feed thread (REST only for feed).
         """
         headers = {
             "Content-Type": "application/json",
@@ -513,7 +486,7 @@ class OpenMetadataHelper:
                 timeout=30,
             )
             rp.raise_for_status()
-            logger.info("Comment added on TestCase %s", test_case_fqn)
+            logger.info("✅ Comment added on TestCase %s", test_case_fqn)
             return
 
         rc = requests.post(
@@ -527,11 +500,53 @@ class OpenMetadataHelper:
             timeout=30,
         )
         rc.raise_for_status()
-        logger.info("Thread created and comment added for TestCase %s", test_case_fqn)
+        logger.info("✅ Thread created + comment added for TestCase %s", test_case_fqn)
 
     def close(self):
         self.metadata.close()
         logger.info("OpenMetadata connection closed.")
+
+
+def _extract_jwt_token(token: str) -> str:
+    raw = (token or "").strip().strip('"').strip("'")
+    if raw.lower().startswith("bearer "):
+        raw = raw.split(" ", 1)[1].strip()
+    if not raw:
+        raise ValueError("OpenMetadata auth token is empty")
+    return raw
+
+
+def _normalize_bearer_token(token: str) -> str:
+    return f"Bearer {_extract_jwt_token(token)}"
+
+
+def _sdk_hostport_from_api_v1(api_v1_url: str) -> str:
+    base = (api_v1_url or "").rstrip("/")
+    if base.endswith("/api/v1"):
+        return base[: -len("/v1")]
+    if base.endswith("/api"):
+        return base
+    return f"{base}/api"
+
+
+def load_omd_config_from_airflow() -> Dict[str, str]:
+    try:
+        from airflow.models import Variable
+    except Exception as exc:
+        raise RuntimeError("Airflow Variable API is not available") from exc
+
+    try:
+        omd_api_url = Variable.get("OMD_API_V1_URL")
+        omd_url = Variable.get("OMD_URL")
+        jwt_token = Variable.get("Quality_token")
+    except KeyError as exc:
+        raise RuntimeError(f"Airflow Variable {exc} not set. Configure it in Airflow UI.") from exc
+
+    return {
+        "OMD_API_URL": omd_api_url,
+        "OMD_URL": omd_url,
+        "JWT_TOKEN": jwt_token,
+    }
 
 
 class OpenMetadataQualityFramework:
@@ -574,8 +589,8 @@ class OpenMetadataQualityFramework:
         project_id: str,
         dataset_id: str,
         table_id: str,
-        schema_fields: Sequence[Dict[str, Any]],
-        time_partitioning: Optional[Dict[str, Any]] = None,
+        schema_fields,
+        time_partitioning: Optional[Dict[str, str]] = None,
         create_if_missing: bool = True,
         gcp_conn_id: str = "bigquery",
     ) -> None:
@@ -584,7 +599,7 @@ class OpenMetadataQualityFramework:
 
         try:
             from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
-        except Exception as exc:  # pragma: no cover - Airflow only
+        except Exception as exc:
             raise RuntimeError("BigQueryHook is not available") from exc
 
         bq_hook = BigQueryHook(gcp_conn_id=gcp_conn_id)
@@ -623,12 +638,13 @@ class OpenMetadataQualityFramework:
         bq_conn_id: str = "bigquery",
         trino_conn_id: str = "trino_lakehouse",
         trino_filter_clause: Optional[str] = None,
-        data_interval_start: Optional[pendulum.DateTime] = None,
-    ) -> List[Dict[str, Any]]:
+        data_interval_start=None,
+    ):
         try:
-            from airflow.providers.trino.hooks.trino import TrinoHook
+            import pendulum
             from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
-        except Exception as exc:  # pragma: no cover - Airflow only
+            from airflow.providers.trino.hooks.trino import TrinoHook
+        except Exception as exc:
             raise RuntimeError("TrinoHook or BigQueryHook is not available") from exc
 
         interval_end = pendulum.instance(data_interval_start or pendulum.now("UTC"))
@@ -807,7 +823,9 @@ class OpenMetadataQualityFramework:
 
     # -------------------- Test execution --------------------
 
-    def _result_timestamp_ms(self, data_interval_start: Optional[pendulum.DateTime]) -> int:
+    def _result_timestamp_ms(self, data_interval_start=None) -> int:
+        import pendulum
+
         base = pendulum.instance(data_interval_start or pendulum.now("UTC"))
         ts = base.subtract(days=1).replace(hour=12, minute=0, second=0, microsecond=0)
         return int(ts.timestamp() * 1000)
@@ -815,10 +833,12 @@ class OpenMetadataQualityFramework:
     def _render_sql(
         self,
         sql_template: str,
-        data_interval_start: Optional[pendulum.DateTime],
-        sql_params: Optional[Dict[str, Any]] = None,
+        data_interval_start=None,
+        sql_params: Optional[Dict[str, str]] = None,
         window_days: Optional[int] = None,
     ) -> str:
+        import pendulum
+
         base = pendulum.instance(data_interval_start or pendulum.now("UTC"))
         end_date = base.subtract(days=1)
         window = window_days or 1
@@ -835,20 +855,22 @@ class OpenMetadataQualityFramework:
 
     def _build_comment_message(
         self,
-        failed_entities: Sequence[str],
+        failed_entities,
         failure_message: str,
         success_message: str,
-        data_interval_start: Optional[pendulum.DateTime],
-        mention_user: Optional[str],
+        data_interval_start=None,
+        mention_user: Optional[str] = None,
     ) -> str:
+        import pendulum
+
         mention = self._build_mention(mention_user)
         mention_prefix = f"{mention} - " if mention else ""
         test_date = pendulum.instance(data_interval_start or pendulum.now("UTC")).subtract(days=1).to_date_string()
         if failed_entities:
-            site_list = "<br>".join(f"- {site}" for site in failed_entities)
+            entity_list = "<br>".join(f"- {entity}" for entity in failed_entities)
             return (
                 f"[Validation date] : {test_date}<br>"
-                f"{mention_prefix}{failure_message}<br>{site_list}</p>"
+                f"{mention_prefix}{failure_message}<br>{entity_list}</p>"
             )
         return f"[Validation date] : {test_date}<br>{mention_prefix}{success_message}</p>"
 
@@ -857,8 +879,8 @@ class OpenMetadataQualityFramework:
         test_case_name: str,
         table_fqn: str,
         sql_template: str,
-        sql_params: Optional[Dict[str, Any]] = None,
-        data_interval_start: Optional[pendulum.DateTime] = None,
+        sql_params: Optional[Dict[str, str]] = None,
+        data_interval_start=None,
         window_days: Optional[int] = None,
         bq_conn_id: str = "bigquery_standard",
         bq_location: Optional[str] = None,
@@ -874,7 +896,7 @@ class OpenMetadataQualityFramework:
     ) -> None:
         try:
             from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
-        except Exception as exc:  # pragma: no cover - Airflow only
+        except Exception as exc:
             raise RuntimeError("BigQueryHook is not available") from exc
 
         sql = self._render_sql(sql_template, data_interval_start, sql_params, window_days)
@@ -923,8 +945,8 @@ class OpenMetadataQualityFramework:
 
     def run_bq_test_cases(
         self,
-        test_cases: Sequence[Dict[str, Any]],
-        data_interval_start: Optional[pendulum.DateTime] = None,
+        test_cases,
+        data_interval_start=None,
         bq_conn_id: str = "bigquery_standard",
         bq_location: Optional[str] = None,
         create_incident: bool = True,
